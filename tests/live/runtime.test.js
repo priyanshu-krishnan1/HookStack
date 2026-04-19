@@ -15,7 +15,39 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function ensurePodmanAvailable() {
+function commandExists(command) {
+  try {
+    execSync(`command -v ${command}`, { stdio: 'ignore' });
+    return true;
+  } catch (error) {
+    return false;
+  }
+}
+
+function getComposeCommand() {
+  if (commandExists('docker')) {
+    try {
+      execSync('docker compose version', { stdio: 'ignore' });
+      return 'docker compose';
+    } catch (error) {
+      // Ignore and continue checking other options.
+    }
+  }
+
+  if (commandExists('podman-compose')) {
+    return 'podman-compose';
+  }
+
+  throw new Error(
+    'No supported compose command found. Install Docker with `docker compose` or install `podman-compose` for local live test execution.'
+  );
+}
+
+function ensureContainerRuntimeAvailable(composeCommand) {
+  if (composeCommand === 'docker compose') {
+    return;
+  }
+
   try {
     execSync('podman info', { stdio: 'ignore' });
   } catch (error) {
@@ -26,7 +58,10 @@ function ensurePodmanAvailable() {
 }
 
 function runCompose(args, options = {}) {
-  return execSync(`podman-compose ${args}`, {
+  const composeCommand = getComposeCommand();
+  ensureContainerRuntimeAvailable(composeCommand);
+
+  return execSync(`${composeCommand} ${args}`, {
     stdio: options.quiet ? 'ignore' : 'inherit'
   });
 }
@@ -207,10 +242,9 @@ describe('live runtime webhook flow', () => {
     }
 
     try {
-      ensurePodmanAvailable();
       runCompose('down');
     } catch (error) {
-      // Ignore teardown infra errors when Podman is unavailable.
+      // Ignore teardown infra errors when container tooling is unavailable.
     }
   });
 
