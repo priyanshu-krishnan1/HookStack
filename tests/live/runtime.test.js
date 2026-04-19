@@ -185,7 +185,6 @@ describe('live runtime webhook flow', () => {
   jest.setTimeout(TEST_TIMEOUT_MS);
 
   beforeAll(async () => {
-    ensurePodmanAvailable();
     runCompose('up -d');
 
     pool = new Pool({ connectionString: DATABASE_URL });
