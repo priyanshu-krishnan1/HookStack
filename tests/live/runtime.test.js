@@ -10,6 +10,7 @@ const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || 'change-me';
 let receiverRuntime;
 let workerRuntime;
 let pool;
+let startedLocalInfra = false;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -64,6 +65,26 @@ function runCompose(args, options = {}) {
   return execSync(`${composeCommand} ${args}`, {
     stdio: options.quiet ? 'ignore' : 'inherit'
   });
+}
+
+async function infrastructureIsReachable() {
+  const probePool = new Pool({ connectionString: DATABASE_URL });
+
+  try {
+    await probePool.query('SELECT 1');
+
+    const amqp = require('amqplib');
+    const connection = await amqp.connect(
+      process.env.RABBITMQ_URL || 'amqp://app_user:app_password@localhost:5672'
+    );
+    await connection.close();
+
+    return true;
+  } catch (error) {
+    return false;
+  } finally {
+    await probePool.end().catch(() => {});
+  }
 }
 
 async function waitFor(check, options = {}) {
@@ -185,7 +206,12 @@ describe('live runtime webhook flow', () => {
   jest.setTimeout(TEST_TIMEOUT_MS);
 
   beforeAll(async () => {
-    runCompose('up -d');
+    const infraAlreadyAvailable = await infrastructureIsReachable();
+
+    if (!infraAlreadyAvailable) {
+      runCompose('up -d');
+      startedLocalInfra = true;
+    }
 
     pool = new Pool({ connectionString: DATABASE_URL });
 
@@ -240,10 +266,12 @@ describe('live runtime webhook flow', () => {
       await pool.end();
     }
 
-    try {
-      runCompose('down');
-    } catch (error) {
-      // Ignore teardown infra errors when container tooling is unavailable.
+    if (startedLocalInfra) {
+      try {
+        runCompose('down');
+      } catch (error) {
+        // Ignore teardown infra errors when container tooling is unavailable.
+      }
     }
   });
 
