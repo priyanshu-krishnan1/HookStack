@@ -9,13 +9,20 @@ describe('shared/config', () => {
   });
 
   test('uses defaults when env is not set', () => {
+    delete process.env.PORT;
+    delete process.env.MAX_RETRIES;
+    delete process.env.RETRY_DELAY_MS;
+    delete process.env.WORKER_PREFETCH;
+    delete process.env.WEBHOOK_SECRET;
+
+    jest.resetModules();
     const config = require('../../shared/config');
 
     expect(config.app.receiverPort).toBe(4000);
     expect(config.app.maxAttempts).toBe(3);
     expect(config.app.retryDelayMs).toBe(1000);
     expect(config.app.workerPrefetch).toBe(10);
-    expect(config.app.webhookSecret).toBe('supersecret');
+    expect(config.app.webhookSecret).toBe('change-me');
   });
 
   test('uses env overrides', () => {
