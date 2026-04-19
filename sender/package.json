@@ -1,0 +1,12 @@
+{
+  "name": "webhook-sender-example",
+  "version": "1.0.0",
+  "description": "Minimal webhook sender example",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "axios": "^1.9.0"
+  }
+}

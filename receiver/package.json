@@ -1,0 +1,14 @@
+{
+  "name": "webhook-receiver-example",
+  "version": "1.0.0",
+  "description": "Production-style webhook receiver using PostgreSQL and RabbitMQ",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "amqplib": "^0.10.5",
+    "express": "^4.21.2",
+    "pg": "^8.13.1"
+  }
+}

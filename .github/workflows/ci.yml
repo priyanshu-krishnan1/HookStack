@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+
+jobs:
+  validate:
+    name: Validate contributions
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: webhook
+          POSTGRES_USER: webhook
+          POSTGRES_PASSWORD: webhook
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U webhook -d webhook"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+      rabbitmq:
+        image: rabbitmq:3.13-management
+        env:
+          RABBITMQ_DEFAULT_USER: webhook
+          RABBITMQ_DEFAULT_PASS: webhook
+        ports:
+          - 5672:5672
+          - 15672:15672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics ping"
+          --health-interval 10s
+          --health-timeout 10s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://webhook:webhook@localhost:5432/webhook
+      RABBITMQ_URL: amqp://webhook:webhook@localhost:5672
+      WEBHOOK_SECRET: supersecret
+      PORT: 4100
+      MAX_RETRIES: 2
+      RETRY_DELAY_MS: 200
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            receiver/package-lock.json
+            worker/package-lock.json
+            sender/package-lock.json
+
+      - name: Install root dependencies
+        run: npm install
+
+      - name: Install receiver dependencies
+        run: cd receiver && npm install
+
+      - name: Install worker dependencies
+        run: cd worker && npm install
+
+      - name: Install sender dependencies
+        run: cd sender && npm install
+
+      - name: Apply PostgreSQL schema
+        run: PGPASSWORD=webhook psql -h localhost -U webhook -d webhook -f shared/schema.sql
+
+      - name: Run unit tests
+        run: npm run test:unit
+
+      - name: Run integration tests
+        run: npm run test:integration
+
+      - name: Run architecture tests
+        run: npm run test:architecture
+
+      - name: Run live runtime tests
+        run: npm run test:live
+
+# Made with Bob

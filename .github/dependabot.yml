@@ -1,0 +1,64 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+      - security
+    groups:
+      root-npm-dependencies:
+        patterns:
+          - "*"
+
+  - package-ecosystem: npm
+    directory: "/receiver"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+      - security
+    groups:
+      receiver-npm-dependencies:
+        patterns:
+          - "*"
+
+  - package-ecosystem: npm
+    directory: "/worker"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+      - security
+    groups:
+      worker-npm-dependencies:
+        patterns:
+          - "*"
+
+  - package-ecosystem: npm
+    directory: "/sender"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+      - security
+    groups:
+      sender-npm-dependencies:
+        patterns:
+          - "*"
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+      - security
+
+# Made with Bob
