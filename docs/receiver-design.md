@@ -6,24 +6,26 @@ The template should accept signed webhook requests quickly, persist them durably
 
 ## Active processing flow
 
-1. Sender sends `POST /webhook`
-2. Receiver captures the raw body
-3. Receiver verifies `x-webhook-signature`
-4. Receiver validates required fields: `id`, `type`, and `createdAt`
-5. Receiver inserts event, job, and outbox rows in PostgreSQL inside one transaction
-6. Receiver publishes pending outbox messages to RabbitMQ
-7. Receiver returns `202`
-8. Worker consumes the RabbitMQ message
-9. Worker loads and locks the corresponding job
-10. Worker runs business logic for the event type
-11. Worker marks the job and event as processed, or retries/dead-letters on failure
+1. A provider sends `POST /webhook`
+2. The receiver captures the raw body
+3. The receiver selects the configured provider adapter
+4. The adapter verifies provider-specific signature headers
+5. The adapter normalizes the incoming request into the internal event model
+6. The receiver inserts event, job, and outbox rows in PostgreSQL inside one transaction
+7. The receiver publishes pending outbox messages to RabbitMQ
+8. The receiver returns `202`
+9. The worker consumes the RabbitMQ message
+10. The worker loads and locks the corresponding job
+11. The worker runs business logic for the normalized event type
+12. The worker marks the job and event as processed, or retries/dead-letters on failure
 
 ## Receiver responsibilities
 
 The receiver in `receiver/index.js` is responsible for:
 
-- HMAC SHA-256 signature verification
-- payload validation
+- raw body capture
+- provider adapter selection
+- signature verification through the active provider adapter
 - database-backed idempotency using `webhook_events.event_id`
 - durable job creation in `job_queue`
 - durable outbox creation in `outbox_messages`
@@ -33,6 +35,66 @@ The receiver in `receiver/index.js` is responsible for:
   - `GET /events`
   - `GET /jobs`
 
+## Provider adapter responsibilities
+
+The provider adapter layer in `receiver/providers.js` is responsible for:
+
+- reading provider-specific headers
+- validating provider-specific signature formats
+- extracting provider delivery identifiers
+- mapping external payloads into one internal event shape
+- keeping provider-specific parsing out of the main receiver pipeline
+
+This design lets downstream users add a new provider without rewriting the persistence and queueing flow.
+
+## Internal normalized event model
+
+Provider adapters convert inbound requests into one stable internal shape before persistence.
+
+Conceptually, normalized events include:
+
+- `id`
+- `type`
+- `createdAt`
+- optional provider metadata
+- raw provider payload nested under `data`
+
+This keeps the database schema and worker flow reusable across providers.
+
+## Built-in providers
+
+### Generic provider
+
+The generic provider expects:
+
+- header: `x-webhook-signature`
+- raw HMAC SHA-256 hex digest
+- payload fields:
+  - `id`
+  - `type`
+  - `createdAt`
+
+This is useful for custom integrations and for understanding the baseline template flow.
+
+### GitHub provider example
+
+The built-in GitHub example expects:
+
+- header: `x-hub-signature-256`
+- header: `x-github-event`
+- header: `x-github-delivery`
+
+The GitHub adapter normalizes requests into internal event types such as:
+
+- `github.push`
+- `github.pull_request.opened`
+
+For example, a GitHub `push` request becomes an internal event with:
+
+- event ID from `x-github-delivery`
+- event type from `x-github-event`
+- raw GitHub payload preserved under `data`
+
 ## Worker responsibilities
 
 The worker in `worker/index.js` is responsible for:
@@ -40,14 +102,16 @@ The worker in `worker/index.js` is responsible for:
 - consuming RabbitMQ messages from the configured processing queue
 - loading and locking the corresponding job row from PostgreSQL
 - marking jobs as `processing`
-- running event-type business logic
+- running normalized event-type business logic
 - marking jobs and events as `processed`
 - retrying failed jobs up to `MAX_RETRIES`
 - writing exhausted failures to `dead_letters`
 
-## Sample business logic
+## Built-in business logic examples
 
-The template includes intentionally generic sample event handling:
+The template includes intentionally simple handlers for both generic and GitHub-style normalized events.
+
+### Generic examples
 
 - `sample.event.created`
   - worker logs processing
@@ -56,14 +120,21 @@ The template includes intentionally generic sample event handling:
   - worker logs processing
   - result action: `sample_failure_followup_completed`
 
+### GitHub examples
+
+- `github.push`
+  - worker logs repository context
+  - result action: `github_push_processed`
+- `github.pull_request.*`
+  - worker logs pull request context and action
+  - result action: `github_pull_request_processed`
+
 Unsupported event types are treated as ignored no-op completions:
 
 - worker returns `status: 'ignored'`
 - the job is still marked `processed`
 - the event is still marked `processed`
 - no dead-letter row is created for unsupported types
-
-Replace the sample event names and worker actions with your own domain-specific workflow.
 
 ## Why the receiver and worker are separated
 
@@ -73,8 +144,8 @@ The architecture separates ingestion from business processing.
 
 Handled by the receiver:
 
-- authentication and signature verification
-- schema validation
+- provider-specific signature handling through adapters
+- schema normalization
 - idempotency check
 - durable persistence
 - outbox publish trigger
@@ -95,7 +166,7 @@ This separation keeps webhook acknowledgment fast and prevents slow business wor
 
 ### `webhook_events`
 
-Stores received webhook payloads and final event state.
+Stores normalized webhook payloads and final event state.
 
 Important fields:
 
@@ -168,7 +239,8 @@ Idempotency is database-backed.
 
 When the receiver gets a webhook:
 
-- it checks `webhook_events` for the same `event_id`
+- the active provider adapter derives a stable event ID
+- the receiver checks `webhook_events` for the same `event_id`
 - if found, it returns `200` with `Duplicate event ignored`
 - it does not create a second event row, job row, or outbox row
 
@@ -227,16 +299,15 @@ Returns:
 - recent job rows from `job_queue`
 - recent dead-letter rows from `dead_letters`
 
-## What to customize in downstream projects
+## How to add a new provider
 
-When reusing this template, customize at least:
+When reusing this template, the preferred extension path is:
 
-- sender payload fields
-- event naming conventions
-- worker handler logic
-- queue/exchange/routing names
-- schema/table layout if required by your domain
-- inspection endpoint exposure and auth model
+1. add a new adapter in `receiver/providers.js`
+2. normalize the provider request into the internal event shape
+3. add matching worker handlers in `worker/index.js`
+4. add sender simulation only if useful for local development
+5. update tests and docs
 
 ## Known design gaps
 
@@ -248,5 +319,5 @@ Current gaps include:
 - no exponential backoff strategy
 - no metrics, tracing, or structured logging pipeline
 - no auth on inspection endpoints
-- no schema validation library beyond basic field checks
+- no schema validation library beyond adapter/basic field checks
 - no deployment manifests or migration tooling

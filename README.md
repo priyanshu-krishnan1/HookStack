@@ -3,7 +3,7 @@
 Reusable Node.js webhook template with:
 
 - signed webhook sender
-- Express-based receiver with HMAC signature verification
+- Express-based receiver with provider-adapter support
 - PostgreSQL-backed durable event, job, and outbox persistence
 - RabbitMQ-backed asynchronous worker processing
 - automated tests, including live runtime flow validation
@@ -13,16 +13,16 @@ Reusable Node.js webhook template with:
 ## Architecture
 
 ```text
-sender -> receiver -> PostgreSQL (webhook_events, job_queue, outbox_messages)
-                      -> RabbitMQ -> worker
+sender/provider -> receiver -> PostgreSQL (webhook_events, job_queue, outbox_messages)
+                            -> RabbitMQ -> worker
 ```
 
-This repository is intended to be reused as a webhook processing starter template. Replace the sample event names, payload shape, and business logic with your own project-specific implementation.
+This repository is intended to be reused as a webhook processing starter template. It supports a provider-adapter pattern so you can keep the core pipeline stable while adding provider-specific normalization for sources such as generic custom webhooks or GitHub webhooks.
 
 ## Repository contents
 
 - `sender/` - signed webhook sender with single-event and burst sending support
-- `receiver/` - webhook ingress service and outbox publisher trigger
+- `receiver/` - webhook ingress service, provider adapters, and outbox publisher trigger
 - `worker/` - background consumer that processes queued jobs
 - `shared/` - config, schema, PostgreSQL, and RabbitMQ helpers
 - `tests/` - unit, integration, architecture, and live runtime tests
@@ -46,6 +46,7 @@ Update the values for your environment, especially:
 - `DATABASE_URL`
 - `RABBITMQ_URL`
 - broker naming values such as exchange, queue, and routing key
+- `WEBHOOK_PROVIDER`
 
 ### 2. Install dependencies
 
@@ -100,55 +101,85 @@ Each worker process consumes from the same RabbitMQ queue.
 
 ### 6. Send sample events
 
-Single event:
+Generic single event:
 
 ```bash
 cd sender
 npm start
 ```
 
-Burst send:
+Generic burst send:
 
 ```bash
 cd sender
 EVENT_COUNT=20 SENDER_CONCURRENCY=5 npm start
 ```
 
-Mixed event types:
+Generic mixed event types:
 
 ```bash
 cd sender
 EVENT_COUNT=20 SENDER_CONCURRENCY=5 MIXED_EVENT_TYPES=true npm start
 ```
 
+GitHub-style example:
+
+```bash
+cd sender
+WEBHOOK_PROVIDER=github npm start
+```
+
+GitHub-style mixed example:
+
+```bash
+cd sender
+WEBHOOK_PROVIDER=github EVENT_COUNT=10 SENDER_CONCURRENCY=3 MIXED_EVENT_TYPES=true npm start
+```
+
 ## Template defaults
 
-The template currently uses generic sample event types:
+The template supports two provider modes:
+
+- `generic` - internal sample contract using `x-webhook-signature`
+- `github` - built-in example adapter using GitHub-style headers and normalized event names
+
+Generic sample event types:
 
 - `sample.event.created`
 - `sample.event.failed`
 
-These exist only to demonstrate the flow. Replace them with your own event contracts and worker handlers.
+Built-in GitHub normalized event examples:
+
+- `github.push`
+- `github.pull_request.opened`
+
+These exist to demonstrate the provider adapter flow. Replace them with your own provider handlers as needed.
 
 ## Runtime behavior
 
-- `POST /webhook` verifies `x-webhook-signature`, validates the payload, persists the event/job/outbox rows in PostgreSQL, publishes pending outbox messages, and returns `202`
-- duplicate `event.id` values are ignored through database-backed idempotency
+- `POST /webhook` selects a provider adapter based on `WEBHOOK_PROVIDER`
+- the adapter verifies provider-specific signature headers and normalizes incoming requests into the internal event model
+- normalized event/job/outbox rows are persisted in PostgreSQL and published through RabbitMQ
+- duplicate event IDs are ignored through database-backed idempotency
 - workers consume RabbitMQ messages, lock the corresponding job, run business logic, and update final job/event state
 - unsupported event types are marked complete as ignored no-op processing, not dead-lettered
 - `/health`, `/events`, and `/jobs` expose runtime inspection data
 
-## What you should customize before reuse
+## How to adapt this template to a new webhook provider
 
-At minimum, replace:
+The recommended extension point is the provider adapter layer.
 
-- sample event names in `sender/index.js` and `worker/index.js`
-- sample payload fields in `sender/index.js`
-- worker business logic in `worker/index.js`
-- default secrets and connection strings in `.env`
-- broker naming values in `.env`
-- database schema/table names if your project needs a different model
-- docs wording to match your domain once you fork the template
+For a new provider, usually change:
+
+- `receiver/providers.js` to add a new adapter that:
+  - reads provider-specific headers
+  - verifies the provider signature format
+  - maps provider payloads into the internal event model
+- `worker/index.js` to add handlers for your normalized event names
+- `sender/index.js` only if you want a local simulator for that provider
+- tests and docs to cover the new provider behavior
+
+For many real integrations, the database schema, queue flow, retry model, and worker runtime can stay unchanged.
 
 ## Tests
 

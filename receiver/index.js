@@ -1,35 +1,8 @@
-const crypto = require('crypto');
 const express = require('express');
 const { app, rabbitmq } = require('../shared/config');
 const { withTransaction, query, closePool } = require('../shared/db');
 const { connectRabbitMq, publishMessage, closeRabbitMq } = require('../shared/rabbitmq');
-
-function computeSignature(rawBody) {
-  return crypto.createHmac('sha256', app.webhookSecret).update(rawBody).digest('hex');
-}
-
-function signaturesMatch(receivedSignature, expectedSignature) {
-  const receivedBuffer = Buffer.from(receivedSignature || '', 'utf8');
-  const expectedBuffer = Buffer.from(expectedSignature, 'utf8');
-
-  if (receivedBuffer.length !== expectedBuffer.length) {
-    return false;
-  }
-
-  return crypto.timingSafeEqual(receivedBuffer, expectedBuffer);
-}
-
-function validateEvent(event) {
-  if (!event || typeof event !== 'object') {
-    return 'Invalid JSON payload';
-  }
-
-  if (!event.id || !event.type || !event.createdAt) {
-    return 'Payload must include id, type, and createdAt';
-  }
-
-  return null;
-}
+const { computeHexSignature, signaturesMatch, getProviderAdapter } = require('./providers');
 
 async function publishOutboxMessages() {
   const result = await query(
@@ -53,6 +26,7 @@ async function publishOutboxMessages() {
 }
 
 function createReceiverApp() {
+  const provider = getProviderAdapter(process.env.WEBHOOK_PROVIDER || 'generic');
   const server = express();
   let isShuttingDown = false;
 
@@ -122,22 +96,18 @@ function createReceiverApp() {
       return res.status(503).json({ error: 'Receiver is shutting down' });
     }
 
-    const receivedSignature = req.header('x-webhook-signature');
+    const parsed = provider.parse(req);
 
-    if (!receivedSignature) {
-      return res.status(400).json({ error: 'Missing x-webhook-signature header' });
+    if (parsed.error) {
+      return res.status(400).json({ error: parsed.error });
     }
 
-    const expectedSignature = computeSignature(req.rawBody || '');
+    if (!parsed.receivedSignature) {
+      return res.status(400).json({ error: `Missing ${provider.signatureHeader} header` });
+    }
 
-    if (!signaturesMatch(receivedSignature, expectedSignature)) {
+    if (!signaturesMatch(parsed.receivedSignature, parsed.expectedSignature)) {
       return res.status(401).json({ error: 'Invalid signature' });
-    }
-
-    const validationError = validateEvent(req.body);
-
-    if (validationError) {
-      return res.status(400).json({ error: validationError });
     }
 
     try {
@@ -146,13 +116,13 @@ function createReceiverApp() {
           `SELECT event_id, status
            FROM webhook_events
            WHERE event_id = $1`,
-          [req.body.id]
+          [parsed.eventId]
         );
 
         if (existingEvent.rows.length > 0) {
           return {
             duplicate: true,
-            eventId: req.body.id,
+            eventId: parsed.eventId,
             status: existingEvent.rows[0].status
           };
         }
@@ -160,29 +130,29 @@ function createReceiverApp() {
         await client.query(
           `INSERT INTO webhook_events (event_id, event_type, payload_json, signature, status)
            VALUES ($1, $2, $3::jsonb, $4, 'received')`,
-          [req.body.id, req.body.type, JSON.stringify(req.body), receivedSignature]
+          [parsed.eventId, parsed.eventType, JSON.stringify(parsed.normalizedPayload), parsed.receivedSignature]
         );
 
         await client.query(
           `INSERT INTO job_queue (event_id, job_type, status, attempt_count, max_attempts, available_at)
            VALUES ($1, $2, 'queued', 0, $3, NOW())`,
-          [req.body.id, req.body.type, app.maxAttempts]
+          [parsed.eventId, parsed.eventType, app.maxAttempts]
         );
 
         await client.query(
           `INSERT INTO outbox_messages (event_id, exchange_name, routing_key, payload_json)
            VALUES ($1, $2, $3, $4::jsonb)`,
           [
-            req.body.id,
+            parsed.eventId,
             rabbitmq.exchange,
             rabbitmq.routingKey,
-            JSON.stringify({ eventId: req.body.id })
+            JSON.stringify({ eventId: parsed.eventId, provider: provider.name })
           ]
         );
 
         return {
           duplicate: false,
-          eventId: req.body.id
+          eventId: parsed.eventId
         };
       });
 
@@ -270,7 +240,7 @@ if (require.main === module) {
 }
 
 module.exports = {
-  computeSignature,
+  computeSignature: computeHexSignature,
   publishOutboxMessages,
   createReceiverApp,
   startReceiver

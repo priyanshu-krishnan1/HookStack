@@ -7,29 +7,31 @@ The template provides these reliability features:
 - database-backed event persistence before returning `202`
 - database-backed durable job creation before returning `202`
 - outbox row creation in the same transaction as event and job persistence
-- database-backed idempotency using unique event IDs
+- database-backed idempotency using unique normalized event IDs
 - RabbitMQ durable queueing for asynchronous processing
 - worker retry with configurable retry count
 - dead-letter recording in PostgreSQL for exhausted failures
 - manual message acknowledgments after successful processing
 - startup connection retry behavior for RabbitMQ clients
 - multi-worker processing through a shared broker queue
+- provider-adapter based normalization before persistence
 
 ## Ingestion durability flow
 
 When a webhook arrives:
 
-1. verify signature
-2. validate payload
-3. check whether the event already exists in `webhook_events`
-4. insert the event row into `webhook_events`
-5. insert the job row into `job_queue`
-6. insert the outbox row into `outbox_messages`
-7. commit the transaction
-8. publish pending outbox rows to RabbitMQ
-9. return `202`
+1. the receiver selects the configured provider adapter
+2. the adapter verifies the provider signature
+3. the adapter normalizes the request into the internal event model
+4. the receiver checks whether the event already exists in `webhook_events`
+5. the receiver inserts the event row into `webhook_events`
+6. the receiver inserts the job row into `job_queue`
+7. the receiver inserts the outbox row into `outbox_messages`
+8. the transaction commits
+9. the receiver publishes pending outbox rows to RabbitMQ
+10. the receiver returns `202`
 
-This means the receiver does not acknowledge accepted processing until the event, job, and outbox records are durable in PostgreSQL.
+This means the receiver does not acknowledge accepted processing until the normalized event, job, and outbox records are durable in PostgreSQL.
 
 ## Why the outbox matters
 
@@ -102,7 +104,7 @@ MAX_RETRIES
 
 Idempotency is enforced by the receiver through PostgreSQL.
 
-If the same `event_id` is delivered more than once:
+If the same normalized `event_id` is delivered more than once:
 
 - the existing row in `webhook_events` is detected
 - the receiver returns `200`
@@ -110,6 +112,25 @@ If the same `event_id` is delivered more than once:
 - no second job row or outbox row is created
 
 This is durable across restarts and works with multiple receiver instances sharing the same database.
+
+## Why provider adapters help reliability
+
+Provider adapters improve reuse without weakening reliability because they isolate provider differences from the durable processing pipeline.
+
+The core reliability path stays unchanged:
+
+- signature verified
+- request normalized
+- durable persistence
+- outbox publish intent stored
+- worker processes normalized events
+
+This means a new provider can often be added without changing:
+
+- table layout
+- queue/outbox behavior
+- retry logic
+- worker runtime lifecycle
 
 ## Worker acknowledgment model
 
@@ -148,8 +169,9 @@ WORKER_ID=worker-1 npm start
 
 ## Template defaults
 
-The template ships with generic defaults such as:
+The template ships with provider-aware defaults such as:
 
+- `WEBHOOK_PROVIDER=generic`
 - `WEBHOOK_SECRET=change-me`
 - `DATABASE_URL=postgresql://app_user:app_password@localhost:5432/app_db`
 - `RABBITMQ_URL=amqp://app_user:app_password@localhost:5672`
@@ -157,6 +179,20 @@ The template ships with generic defaults such as:
 - queue: `app.events.processing`
 
 These are placeholders and should be replaced in real projects.
+
+## Built-in provider examples
+
+The bundled examples currently cover:
+
+- generic custom webhook mode
+- GitHub-style webhook mode
+
+GitHub-specific normalization examples include:
+
+- `github.push`
+- `github.pull_request.opened`
+
+These examples are intended to demonstrate the adapter pattern, not to be a complete GitHub integration surface.
 
 ## Inspection endpoints
 
@@ -184,7 +220,7 @@ Returns recent job rows and dead-letter rows.
 
 ### Duplicate delivery
 
-Handled by database-backed idempotency.
+Handled by database-backed idempotency on normalized event IDs.
 
 ### Receiver crash after database commit but before publish
 
@@ -214,15 +250,17 @@ This template is a strong starting point, but production adopters should still a
 - formal migration tooling
 - stronger readiness checks for all downstream dependencies
 - domain-specific schema validation and business error handling
+- provider-specific replay and threat-model controls where required
 
 ## Practical template guidance
 
-Reuse the structure as-is, but replace:
+Reuse the structure as-is, but replace or extend:
 
 - secrets
 - connection strings
 - queue names
 - routing keys
-- sample event names
+- provider adapter rules
+- example event names
 - worker logic
 - operational controls required by your environment

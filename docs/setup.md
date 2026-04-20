@@ -9,6 +9,7 @@ sender/
 receiver/
   package.json
   index.js
+  providers.js
 worker/
   package.json
   index.js
@@ -31,11 +32,11 @@ README.md
 ## Template architecture
 
 ```text
-sender -> receiver -> PostgreSQL (webhook_events, job_queue, outbox_messages)
-                      -> RabbitMQ -> worker
+sender/provider -> receiver -> PostgreSQL (webhook_events, job_queue, outbox_messages)
+                            -> RabbitMQ -> worker
 ```
 
-This repository is a reusable webhook processing template. The included event names, payload fields, and worker actions are intentionally generic samples that should be replaced in downstream projects.
+This repository is a reusable webhook processing template. The core durability and worker pipeline stay stable while provider adapters normalize incoming webhook formats into one internal event model.
 
 ## Default local endpoints
 
@@ -52,6 +53,7 @@ This repository is a reusable webhook processing template. The included event na
 - RabbitMQ user: `app_user`
 - RabbitMQ password: `app_password`
 - Shared webhook secret: `change-me`
+- Default provider mode: `generic`
 
 ## Environment variables
 
@@ -60,6 +62,7 @@ Use `.env.example` as the starting point.
 ### Shared application settings
 
 - `WEBHOOK_SECRET` shared by sender and receiver
+- `WEBHOOK_PROVIDER` provider adapter to use, default `generic`
 - `PORT` receiver HTTP port
 - `MAX_RETRIES` maximum worker retry attempts per job
 - `RETRY_DELAY_MS` fixed retry delay before requeue
@@ -80,8 +83,8 @@ Use `.env.example` as the starting point.
 - `WEBHOOK_URL` destination URL for the sender
 - `EVENT_COUNT` number of events to send in one run
 - `SENDER_CONCURRENCY` number of concurrent sender requests
-- `EVENT_TYPE` event type to send, default `sample.event.created`
-- `MIXED_EVENT_TYPES=true` alternates between `sample.event.created` and `sample.event.failed`
+- `EVENT_TYPE` event type to send in generic mode, default `sample.event.created`
+- `MIXED_EVENT_TYPES=true` alternates example event payloads in the active provider mode
 
 ### Worker controls
 
@@ -121,9 +124,18 @@ This starts PostgreSQL and RabbitMQ locally with the template defaults from `doc
 
 ## Start receiver
 
+Generic provider mode:
+
 ```bash
 cd receiver
 npm start
+```
+
+GitHub provider mode:
+
+```bash
+cd receiver
+WEBHOOK_PROVIDER=github npm start
 ```
 
 Expected output:
@@ -147,7 +159,7 @@ Expected output:
 [worker] listening for messages
 ```
 
-## Send a sample webhook
+## Send a generic sample webhook
 
 In another terminal:
 
@@ -156,14 +168,7 @@ cd sender
 npm start
 ```
 
-Expected sender output includes:
-
-```text
-[sender] delivered
-[sender] batch complete
-```
-
-Expected receiver behavior:
+Expected generic receiver behavior:
 
 - verifies `x-webhook-signature`
 - inserts rows into `webhook_events`, `job_queue`, and `outbox_messages`
@@ -177,20 +182,50 @@ Expected worker behavior:
 - processes sample business logic
 - marks the job and event as processed
 
+## Send a GitHub-style sample webhook
+
+Start the receiver in GitHub mode, then run:
+
+```bash
+cd sender
+WEBHOOK_PROVIDER=github npm start
+```
+
+Expected GitHub-mode receiver behavior:
+
+- verifies `x-hub-signature-256`
+- reads `x-github-event` and `x-github-delivery`
+- normalizes the provider request into an internal event such as `github.push`
+- inserts normalized event, job, and outbox rows
+- returns `202`
+
+Expected worker behavior:
+
+- handles normalized events such as `github.push`
+- logs repository context from the normalized payload
+- marks the job and event as processed
+
 ## Send multiple sample events
 
-Burst send:
+Generic burst:
 
 ```bash
 cd sender
 EVENT_COUNT=20 SENDER_CONCURRENCY=5 npm start
 ```
 
-Mixed event types:
+GitHub burst:
 
 ```bash
 cd sender
-EVENT_COUNT=20 SENDER_CONCURRENCY=5 MIXED_EVENT_TYPES=true npm start
+WEBHOOK_PROVIDER=github EVENT_COUNT=10 SENDER_CONCURRENCY=3 npm start
+```
+
+GitHub mixed example burst:
+
+```bash
+cd sender
+WEBHOOK_PROVIDER=github EVENT_COUNT=10 SENDER_CONCURRENCY=3 MIXED_EVENT_TYPES=true npm start
 ```
 
 Run multiple workers in separate terminals:
@@ -249,9 +284,18 @@ http://localhost:15672
 
 ## Test invalid signature
 
+Generic mode:
+
 ```bash
 cd sender
 WEBHOOK_SECRET=wrongsecret npm start
+```
+
+GitHub mode:
+
+```bash
+cd sender
+WEBHOOK_PROVIDER=github WEBHOOK_SECRET=wrongsecret npm start
 ```
 
 Expected result:
@@ -262,26 +306,45 @@ Expected result:
 
 ## Request flow summary
 
-1. Sender creates a JSON event payload.
-2. Sender signs the raw JSON body using HMAC SHA-256.
-3. Sender sends `x-webhook-signature`.
-4. Receiver verifies the signature.
-5. Receiver validates required fields.
-6. Receiver inserts event, job, and outbox rows in PostgreSQL in one transaction.
-7. Receiver publishes pending outbox rows to RabbitMQ.
-8. Receiver returns `202`.
-9. Worker consumes the queued message.
-10. Worker updates job and event state in PostgreSQL.
+1. A provider-specific sender or external service creates a webhook request.
+2. The request body is signed using the shared secret.
+3. The receiver selects a provider adapter based on `WEBHOOK_PROVIDER`.
+4. The adapter validates provider headers and normalizes the payload.
+5. The receiver inserts event, job, and outbox rows in PostgreSQL in one transaction.
+6. The receiver publishes pending outbox rows to RabbitMQ.
+7. The receiver returns `202`.
+8. The worker consumes the queued message.
+9. The worker updates job and event state in PostgreSQL.
+
+## How to add a new provider
+
+For a new provider, usually add or change:
+
+- `receiver/providers.js`
+  - add a new adapter
+  - verify the provider’s signature header format
+  - normalize the provider payload into the internal event shape:
+    - `id`
+    - `type`
+    - `createdAt`
+    - provider metadata
+    - raw provider payload inside `data`
+- `worker/index.js`
+  - add handlers for the normalized event names
+- `sender/index.js`
+  - optional local simulator for that provider
+- tests and docs
+  - add a provider-specific live path and usage notes
 
 ## Required customization for real projects
 
 Before reusing this template in another project, replace at least:
 
-- sample event names in `sender/index.js` and `worker/index.js`
-- sample payload fields in `sender/index.js`
-- worker business logic in `worker/index.js`
-- secrets and connection strings in `.env`
-- RabbitMQ naming values in `.env`
+- placeholder secrets and connection strings in `.env`
+- broker naming values in `.env`
+- example provider payloads in `sender/index.js`
+- example worker logic in `worker/index.js`
+- provider normalization rules in `receiver/providers.js` if you are not using the built-in examples
 - schema details if your domain requires a different persistence model
 
 ## Notes
@@ -295,5 +358,6 @@ This template provides:
 - separate worker processes
 - retry and dead-letter handling
 - multi-worker concurrency through the broker
+- provider-adapter based request normalization
 
 Known gaps still remain, such as the lack of a dedicated background outbox publisher loop, metrics/tracing, and migration tooling.

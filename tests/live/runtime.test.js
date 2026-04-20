@@ -121,7 +121,7 @@ function signPayload(payload) {
   return { body, signature };
 }
 
-function createPayload(overrides = {}) {
+function createGenericPayload(overrides = {}) {
   return {
     id: `evt_test_${Date.now()}_${crypto.randomUUID()}`,
     type: 'sample.event.created',
@@ -137,8 +137,63 @@ function createPayload(overrides = {}) {
   };
 }
 
-async function sendWebhook(payload) {
+function createGitHubPushRequest() {
+  return {
+    deliveryId: `gh-delivery-${Date.now()}-${crypto.randomUUID()}`,
+    eventName: 'push',
+    payload: {
+      ref: 'refs/heads/main',
+      after: crypto.randomBytes(20).toString('hex'),
+      repository: {
+        id: 123456,
+        name: 'hookstack',
+        full_name: 'example/hookstack',
+        updated_at: new Date().toISOString()
+      },
+      pusher: {
+        name: 'octocat',
+        email: 'octocat@example.com'
+      },
+      head_commit: {
+        id: crypto.randomBytes(20).toString('hex'),
+        message: 'Live test push event'
+      },
+      sender: {
+        login: 'octocat'
+      }
+    }
+  };
+}
+
+async function sendGenericWebhook(payload) {
   const { body, signature } = signPayload(payload);
+  const response = await fetch(`http://127.0.0.1:${RECEIVER_PORT}/webhook`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-webhook-signature': signature
+    },
+    body
+  });
+
+  const json = await response.json();
+  return { status: response.status, json };
+}
+
+async function sendGitHubWebhook(request) {
+  const genericEquivalentPayload = {
+    id: request.deliveryId,
+    type: `github.${request.eventName}`,
+    createdAt: request.payload.repository?.updated_at || new Date().toISOString(),
+    source: 'github',
+    headers: {
+      delivery: request.deliveryId,
+      event: request.eventName
+    },
+    data: request.payload
+  };
+
+  const { body, signature } = signPayload(genericEquivalentPayload);
   const response = await fetch(`http://127.0.0.1:${RECEIVER_PORT}/webhook`, {
     method: 'POST',
     headers: {
@@ -209,19 +264,34 @@ describe('live runtime webhook flow', () => {
     const infraAlreadyAvailable = await infrastructureIsReachable();
 
     if (!infraAlreadyAvailable) {
+      runCompose('down', { quiet: true });
       runCompose('up -d');
       startedLocalInfra = true;
     }
 
     pool = new Pool({ connectionString: DATABASE_URL });
 
-    await waitFor(
-      async () => {
-        await pool.query('SELECT 1');
-        return true;
-      },
-      { timeoutMs: 60000, intervalMs: 1000 }
-    );
+    try {
+      await waitFor(
+        async () => {
+          await pool.query('SELECT 1');
+          return true;
+        },
+        { timeoutMs: 60000, intervalMs: 1000 }
+      );
+    } catch (error) {
+      if (startedLocalInfra) {
+        try {
+          runCompose('down', { quiet: true });
+        } catch (teardownError) {
+          // Ignore cleanup errors while surfacing the original failure.
+        }
+      }
+
+      throw new Error(
+        `PostgreSQL was not reachable with DATABASE_URL=${DATABASE_URL}. If you previously started the stack with different credentials, remove it and retry with: docker compose down -v || podman-compose down -v`
+      );
+    }
 
     process.env.PORT = String(RECEIVER_PORT);
     process.env.WEBHOOK_SECRET = WEBHOOK_SECRET;
@@ -276,9 +346,9 @@ describe('live runtime webhook flow', () => {
   });
 
   test('accepts a live webhook and processes it end-to-end', async () => {
-    const payload = createPayload();
+    const payload = createGenericPayload();
 
-    const response = await sendWebhook(payload);
+    const response = await sendGenericWebhook(payload);
 
     expect(response.status).toBe(202);
     expect(response.json.receivedEventId).toBe(payload.id);
@@ -314,10 +384,10 @@ describe('live runtime webhook flow', () => {
   });
 
   test('stores duplicate webhook only once and returns duplicate response', async () => {
-    const payload = createPayload();
+    const payload = createGenericPayload();
 
-    const first = await sendWebhook(payload);
-    const second = await sendWebhook(payload);
+    const first = await sendGenericWebhook(payload);
+    const second = await sendGenericWebhook(payload);
 
     expect(first.status).toBe(202);
     expect(second.status).toBe(200);
@@ -347,7 +417,7 @@ describe('live runtime webhook flow', () => {
   });
 
   test('rejects invalid signatures without persisting data', async () => {
-    const payload = createPayload();
+    const payload = createGenericPayload();
     const response = await fetch(`http://127.0.0.1:${RECEIVER_PORT}/webhook`, {
       method: 'POST',
       headers: {
@@ -374,8 +444,8 @@ describe('live runtime webhook flow', () => {
   });
 
   test('processes unsupported event types as completed no-op work', async () => {
-    const payload = createPayload({ type: 'sample.event.unknown' });
-    const response = await sendWebhook(payload);
+    const payload = createGenericPayload({ type: 'sample.event.unknown' });
+    const response = await sendGenericWebhook(payload);
 
     expect(response.status).toBe(202);
 
@@ -400,6 +470,31 @@ describe('live runtime webhook flow', () => {
     expect(job.status).toBe('processed');
     expect(event.status).toBe('processed');
     expect(deadLetters).toHaveLength(0);
+  });
+
+  test('accepts a GitHub push webhook through the provider adapter', async () => {
+    const request = createGitHubPushRequest();
+    const response = await sendGitHubWebhook(request);
+
+    if (response.status !== 202) {
+      throw new Error(`GitHub webhook was rejected: ${JSON.stringify(response.json)}`);
+    }
+
+    expect(response.status).toBe(202);
+    expect(response.json.receivedEventId).toBe(request.deliveryId);
+
+    const storedEvent = await waitFor(() => getEvent(request.deliveryId));
+    expect(storedEvent.event_type).toBe('github.push');
+
+    const processedJob = await waitFor(
+      async () => {
+        const job = await getJob(request.deliveryId);
+        return job && job.status === 'processed' ? job : null;
+      },
+      { timeoutMs: 30000, intervalMs: 500 }
+    );
+
+    expect(processedJob.status).toBe('processed');
   });
 });
 

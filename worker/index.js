@@ -22,6 +22,23 @@ async function processSampleEventFailed(event) {
   });
 }
 
+async function processGitHubPushEvent(event) {
+  console.log('[worker] processing github.push', {
+    workerId,
+    eventId: event.event_id,
+    repository: event.payload_json?.data?.repository?.full_name
+  });
+}
+
+async function processGitHubPullRequestEvent(event) {
+  console.log('[worker] processing github.pull_request event', {
+    workerId,
+    eventId: event.event_id,
+    action: event.payload_json?.data?.action,
+    repository: event.payload_json?.data?.repository?.full_name
+  });
+}
+
 async function processEventBusinessLogic(event) {
   if (event.event_type === 'sample.event.created') {
     await processSampleEventCreated(event);
@@ -36,6 +53,22 @@ async function processEventBusinessLogic(event) {
     return {
       status: 'processed',
       action: 'sample_failure_followup_completed'
+    };
+  }
+
+  if (event.event_type === 'github.push') {
+    await processGitHubPushEvent(event);
+    return {
+      status: 'processed',
+      action: 'github_push_processed'
+    };
+  }
+
+  if (event.event_type.startsWith('github.pull_request')) {
+    await processGitHubPullRequestEvent(event);
+    return {
+      status: 'processed',
+      action: 'github_pull_request_processed'
     };
   }
 

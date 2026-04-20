@@ -2,7 +2,7 @@
 
 ## Automated test layers
 
-This template includes Jest-based unit, integration, architecture, and live runtime tests for a PostgreSQL + RabbitMQ webhook processing pipeline.
+This template includes Jest-based unit, integration, architecture, and live runtime tests for a PostgreSQL + RabbitMQ webhook processing pipeline with provider-adapter based ingestion.
 
 ### 1. Unit tests
 
@@ -68,7 +68,7 @@ tests/live/
 
 These tests use real local infrastructure and exercise the actual runtime flow:
 
-1. start PostgreSQL and RabbitMQ with `podman-compose`
+1. connect to existing PostgreSQL and RabbitMQ if already available, otherwise start local infrastructure
 2. wait for PostgreSQL and RabbitMQ readiness
 3. start the receiver and worker in-process
 4. send real HTTP webhook requests
@@ -76,10 +76,11 @@ These tests use real local infrastructure and exercise the actual runtime flow:
 
 Current live coverage includes:
 
-- accepted signed webhook -> persisted event/job/outbox -> processed worker flow
+- accepted generic signed webhook -> persisted event/job/outbox -> processed worker flow
 - duplicate webhook idempotency
 - invalid signature rejection without persistence
 - unsupported event type processed as a no-op completion
+- GitHub-style webhook acceptance through the built-in provider adapter
 
 Run:
 
@@ -115,10 +116,10 @@ cp .env.example .env
 
 Before running live tests, ensure:
 
-- Podman and `podman-compose` are installed and available in `PATH`
-- ports `4100`, `5432`, `5672`, and `15672` are available
-- the local Podman machine or service is running
-- no conflicting PostgreSQL or RabbitMQ stack is already bound to the same ports
+- Podman with `podman-compose` or Docker with `docker compose` is installed and available in `PATH`
+- ports `4100`, `5432`, `5672`, and `15672` are available if the tests need to start local infrastructure
+- the local container runtime is running
+- or PostgreSQL and RabbitMQ are already reachable through the configured environment variables
 
 ## Manual validation
 
@@ -132,11 +133,18 @@ podman-compose up -d
 
 ### Start receiver and multiple workers
 
-Terminal 1:
+Generic mode, terminal 1:
 
 ```bash
 cd receiver
 npm start
+```
+
+GitHub mode, terminal 1:
+
+```bash
+cd receiver
+WEBHOOK_PROVIDER=github npm start
 ```
 
 Terminal 2:
@@ -174,7 +182,7 @@ Expected behavior:
 - `/events` returns recent event rows
 - `/jobs` returns recent job rows and dead letters
 
-### Send a single sample event
+### Send a single generic sample event
 
 ```bash
 cd sender
@@ -189,15 +197,26 @@ Validate:
 - `/events` shows the event
 - `/jobs` shows a processed job
 
-### Validate duplicate protection
+### Send a single GitHub-style sample event
 
-Temporarily reuse the same `event.id` in the sender and run twice:
+Start the receiver in GitHub mode, then run:
 
 ```bash
 cd sender
-npm start
-npm start
+WEBHOOK_PROVIDER=github npm start
 ```
+
+Validate:
+
+- sender sends `x-github-event`, `x-github-delivery`, and `x-hub-signature-256`
+- receiver accepts and normalizes the request
+- `/events` stores the normalized type such as `github.push`
+- worker logs GitHub-oriented processing
+- `/jobs` shows a processed job
+
+### Validate duplicate protection
+
+Temporarily reuse the same delivery ID or event ID in the sender and run twice.
 
 Expected behavior:
 
@@ -208,9 +227,18 @@ Expected behavior:
 
 ### Validate invalid signature rejection
 
+Generic mode:
+
 ```bash
 cd sender
 WEBHOOK_SECRET=wrongsecret npm start
+```
+
+GitHub mode:
+
+```bash
+cd sender
+WEBHOOK_PROVIDER=github WEBHOOK_SECRET=wrongsecret npm start
 ```
 
 Expected behavior:
@@ -235,16 +263,25 @@ Expected behavior:
 
 ### Send a burst
 
+Generic burst:
+
 ```bash
 cd sender
 EVENT_COUNT=20 SENDER_CONCURRENCY=5 npm start
 ```
 
-### Send a mixed burst
+GitHub burst:
 
 ```bash
 cd sender
-EVENT_COUNT=20 SENDER_CONCURRENCY=5 MIXED_EVENT_TYPES=true npm start
+WEBHOOK_PROVIDER=github EVENT_COUNT=20 SENDER_CONCURRENCY=5 npm start
+```
+
+Mixed GitHub burst:
+
+```bash
+cd sender
+WEBHOOK_PROVIDER=github EVENT_COUNT=20 SENDER_CONCURRENCY=5 MIXED_EVENT_TYPES=true npm start
 ```
 
 Expected burst behavior:
@@ -255,7 +292,7 @@ Expected burst behavior:
 - `/health`, `/events`, and `/jobs` reflect progress
 - PostgreSQL tables reflect durable state changes
 
-### Inspect durable state directly
+## Inspect durable state directly
 
 Use `psql` or another PostgreSQL client to inspect:
 
@@ -275,13 +312,14 @@ Expected behavior:
 
 Before using this template in another project, update tests and fixtures to match your own:
 
+- provider adapters
 - event names
 - payload fields
 - sender defaults
 - worker business logic
 - infrastructure credentials and broker names
 
-The bundled tests verify the template defaults until you intentionally customize them.
+The bundled tests verify the template defaults, including the built-in generic and GitHub example paths, until you intentionally customize them.
 
 ## CI validation
 
@@ -298,11 +336,10 @@ This gives pull requests a contribution gate before merge.
 
 ## Important notes
 
-- the live suite runs `podman-compose up -d` during test startup and `podman-compose down` during teardown
+- the live suite can start local infrastructure when needed, but it reuses existing PostgreSQL and RabbitMQ services when they are already available
 - the live tests use a dedicated receiver port `4100` to avoid clashing with the default local receiver port
 - the live suite truncates application tables between test cases
-- if a prior local stack is already running on the same PostgreSQL or RabbitMQ ports, stop it before running the live suite
-- the live suite depends on the generic template defaults unless you update the test configuration along with your template customization
+- the live suite covers both generic and GitHub example flows
 - the architecture test layer is static and does not require live infrastructure
 
 ## Recommended next improvements
@@ -313,3 +350,4 @@ To strengthen runtime confidence further, add live tests for:
 - RabbitMQ outage and outbox recovery behavior
 - graceful shutdown during in-flight work
 - multi-event burst handling and throughput assertions
+- additional provider adapters beyond the bundled GitHub example
