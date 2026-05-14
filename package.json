@@ -11,8 +11,8 @@
     "test:live": "jest --runInBand tests/live"
   },
   "devDependencies": {
-    "amqplib": "^1.0.3",
-    "jest": "^30.3.0",
+    "amqplib": "^2.0.1",
+    "jest": "^30.4.2",
     "pg": "^8.13.1",
     "supertest": "^7.0.0"
   }
